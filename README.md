@@ -2,6 +2,10 @@
 
 A CLI tool for automatically setting up VPS configurations with SSH key authentication and user management.
 
+## DISCLAIMER
+
+This project is still in development and may be a bit confusing to use at this point in time. I recommend using the help command and reading to understand how things work.
+
 ## Overview
 
 AutoVPS is designed to transform a fresh VPS with root password access into a secure server with SSH key authentication and a dedicated user account. It provides an interactive shell similar to msfconsole for configuring and managing VPS setup.
