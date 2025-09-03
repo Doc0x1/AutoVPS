@@ -1,4 +1,4 @@
-use crate::{config::Config, ssh};
+use crate::{config::Config, ssh, script};
 use anyhow::Result;
 use rustyline::{error::ReadlineError, completion::{FilenameCompleter, Completer, Pair}, hint::HistoryHinter, highlight::MatchingBracketHighlighter, validate::MatchingBracketValidator, Editor, CompletionType, Config as RustylineConfig, EditMode};
 use rustyline::history::FileHistory;
@@ -27,9 +27,26 @@ impl Completer for MyHelper {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let option = parts[1];
-                if matches!(option, "ssh_key" | "info_file_path" | "new_user_ssh_key") {
+                if matches!(option, "root_ssh_key" | "user_ssh_key" | "info_file_path" | "script_path") {
                     // Use filename completion for path options
                     return self.completer.complete(line, pos, _ctx);
+                }
+                if option == "mode" {
+                    // Mode completion
+                    let modes = vec!["root", "user", "script"];
+                    let start = line.rfind(' ').map_or(0, |i| i + 1);
+                    let prefix = &line[start..pos];
+                    
+                    let matches: Vec<Pair> = modes
+                        .into_iter()
+                        .filter(|mode| mode.starts_with(prefix))
+                        .map(|mode| Pair {
+                            display: mode.to_string(),
+                            replacement: mode.to_string(),
+                        })
+                        .collect();
+                        
+                    return Ok((start, matches));
                 }
             }
         }
@@ -38,6 +55,7 @@ impl Completer for MyHelper {
         let commands = vec![
             "help", "show", "info", "set", "unset", "connect", "test", 
             "test_key", "copy_key", "copykey", "setup", "run", "exec", 
+            "script", "upload_script", "list_scripts", "deploy",
             "clear", "exit", "quit"
         ];
 
@@ -130,7 +148,9 @@ pub async fn run_interactive_shell() -> Result<()> {
     println!();
 
     loop {
-        let readline = rl.readline("AutoVPS> ");
+        let mode = config.get_mode();
+        let prompt = format!("AutoVPS [{}]> ", mode);
+        let readline = rl.readline(&prompt);
         
         match readline {
             Ok(line) => {
@@ -181,7 +201,13 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
         "set" => {
             if args.is_empty() {
                 println!("Usage: set <option> [value]");
-                println!("Options: username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key");
+                println!("Available options depend on current mode. Basic options:");
+                println!("  mode (root/user/script), username, password, ip, info_file_path");
+                match config.mode {
+                    crate::config::SetupMode::RootOnly => println!("  Root mode: root_ssh_key"),
+                    crate::config::SetupMode::NewUser => println!("  User mode: root_ssh_key, sudo_username, sudo_password, user_ssh_key"),
+                    crate::config::SetupMode::Script => println!("  Script mode: root_ssh_key, script_path, script_args"),
+                }
                 println!("Note: 'password' and 'sudo_password' will prompt for secure input (no value needed)");
                 return Ok(());
             }
@@ -189,7 +215,13 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
             // For password fields, don't require a value argument
             if args.len() < 2 && !matches!(args[0].to_lowercase().as_str(), "password" | "sudo_password") {
                 println!("Usage: set <option> <value>");
-                println!("Options: username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key");
+                println!("Available options depend on current mode. Basic options:");
+                println!("  mode (root/user/script), username, password, ip, info_file_path");
+                match config.mode {
+                    crate::config::SetupMode::RootOnly => println!("  Root mode: root_ssh_key"),
+                    crate::config::SetupMode::NewUser => println!("  User mode: root_ssh_key, sudo_username, sudo_password, user_ssh_key"),
+                    crate::config::SetupMode::Script => println!("  Script mode: root_ssh_key, script_path, script_args"),
+                }
                 println!("Note: 'password' and 'sudo_password' will prompt for secure input (no value needed)");
                 return Ok(());
             }
@@ -198,6 +230,15 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
             let value = if args.len() > 1 { args[1..].join(" ") } else { String::new() };
             
             match option.as_str() {
+                "mode" => {
+                    match config.set_mode(&value) {
+                        Ok(_) => println!("Mode set to: {}", config.get_mode()),
+                        Err(e) => {
+                            println!("Error setting mode: {}", e);
+                            return Ok(());
+                        }
+                    }
+                }
                 "username" => {
                     config.set_username(value.clone());
                     println!("Username set to: {}", value);
@@ -219,11 +260,20 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
                     config.set_ip(value.clone());
                     println!("IP address set to: {}", value);
                 }
-                "ssh_key" => {
-                    match config.set_ssh_key_path(value.clone()) {
-                        Ok(_) => println!("SSH key path set to: {}", value),
+                "root_ssh_key" => {
+                    match config.set_root_ssh_key(value.clone()) {
+                        Ok(_) => println!("Root SSH key path set to: {}", value),
                         Err(e) => {
-                            println!("Error setting SSH key path: {}", e);
+                            println!("Error setting root SSH key path: {}", e);
+                            return Ok(());
+                        }
+                    }
+                }
+                "user_ssh_key" => {
+                    match config.set_user_ssh_key(value.clone()) {
+                        Ok(_) => println!("User SSH key path set to: {}", value),
+                        Err(e) => {
+                            println!("Error setting user SSH key path: {}", e);
                             return Ok(());
                         }
                     }
@@ -254,49 +304,28 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
                         }
                     }
                 }
-                "keep_root_password" => {
-                    match value.to_lowercase().as_str() {
-                        "true" | "yes" | "1" | "on" => {
-                            config.set_keep_root_password(true);
-                            println!("Root password authentication will be kept enabled");
-                        }
-                        "false" | "no" | "0" | "off" => {
-                            config.set_keep_root_password(false);
-                            println!("Root password authentication will be disabled");
-                        }
-                        _ => {
-                            println!("Invalid value. Use: true/false, yes/no, 1/0, or on/off");
-                            return Ok(());
-                        }
-                    }
-                }
-                "use_root_ssh_key" => {
-                    match value.to_lowercase().as_str() {
-                        "true" | "yes" | "1" | "on" => {
-                            config.set_use_root_ssh_key(true);
-                            println!("Root SSH key authentication enabled");
-                        }
-                        "false" | "no" | "0" | "off" => {
-                            config.set_use_root_ssh_key(false);
-                            println!("Root SSH key authentication disabled (password only)");
-                        }
-                        _ => {
-                            println!("Invalid value. Use: true/false, yes/no, 1/0, or on/off");
-                            return Ok(());
-                        }
-                    }
-                }
-                "new_user_ssh_key" => {
-                    match config.set_new_user_ssh_key_path(value.clone()) {
-                        Ok(_) => println!("New user SSH key path set to: {}", value),
+                "script_path" => {
+                    match config.set_script_path(value.clone()) {
+                        Ok(_) => println!("Script path set to: {}", value),
                         Err(e) => {
-                            println!("Error setting new user SSH key path: {}", e);
+                            println!("Error setting script path: {}", e);
                             return Ok(());
                         }
                     }
+                }
+                "script_args" => {
+                    config.set_script_args(value.clone());
+                    println!("Script arguments set to: {}", value);
                 }
                 _ => {
-                    println!("Unknown option: {}. Available options: username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key", option);
+                    println!("Unknown option: {}", option);
+                    println!("Available options depend on current mode. Basic options:");
+                    println!("  mode (root/user/script), username, password, ip, info_file_path");
+                    match config.mode {
+                        crate::config::SetupMode::RootOnly => println!("  Root mode: root_ssh_key"),
+                        crate::config::SetupMode::NewUser => println!("  User mode: root_ssh_key, sudo_username, sudo_password, user_ssh_key"),
+                        crate::config::SetupMode::Script => println!("  Script mode: root_ssh_key, script_path, script_args"),
+                    }
                 }
             }
             
@@ -305,12 +334,22 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
         "unset" => {
             if args.is_empty() {
                 println!("Usage: unset <option>");
-                println!("Options: username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key");
+                println!("Available options depend on current mode. Basic options:");
+                println!("  mode (root/user/script), username, password, ip, info_file_path");
+                match config.mode {
+                    crate::config::SetupMode::RootOnly => println!("  Root mode: root_ssh_key"),
+                    crate::config::SetupMode::NewUser => println!("  User mode: root_ssh_key, sudo_username, sudo_password, user_ssh_key"),
+                    crate::config::SetupMode::Script => println!("  Script mode: root_ssh_key, script_path, script_args"),
+                }
                 return Ok(());
             }
             
             let option = args[0].to_lowercase();
             match option.as_str() {
+                "mode" => {
+                    config.mode = crate::config::SetupMode::default();
+                    println!("Mode reset to default (NEW-USER)");
+                }
                 "username" => {
                     config.username = None;
                     println!("Username unset");
@@ -323,9 +362,13 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
                     config.ip = None;
                     println!("IP address unset");
                 }
-                "ssh_key" => {
-                    config.ssh_key_path = None;
-                    println!("SSH key path unset");
+                "root_ssh_key" => {
+                    config.root_ssh_key = None;
+                    println!("Root SSH key path unset");
+                }
+                "user_ssh_key" => {
+                    config.user_ssh_key = None;
+                    println!("User SSH key path unset");
                 }
                 "sudo_username" => {
                     config.sudo_username = None;
@@ -339,20 +382,23 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
                     config.info_file_path = None;
                     println!("Info file path unset");
                 }
-                "keep_root_password" => {
-                    config.keep_root_password = true; // Reset to default
-                    println!("Keep root password reset to default (enabled)");
+                "script_path" => {
+                    config.script_path = None;
+                    println!("Script path unset");
                 }
-                "use_root_ssh_key" => {
-                    config.use_root_ssh_key = true; // Reset to default
-                    println!("Use root SSH key reset to default (enabled)");
-                }
-                "new_user_ssh_key" => {
-                    config.new_user_ssh_key_path = None;
-                    println!("New user SSH key path unset");
+                "script_args" => {
+                    config.script_args = None;
+                    println!("Script arguments unset");
                 }
                 _ => {
-                    println!("Unknown option: {}. Available options: username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key", option);
+                    println!("Unknown option: {}", option);
+                    println!("Available options depend on current mode. Basic options:");
+                    println!("  mode (root/user/script), username, password, ip, info_file_path");
+                    match config.mode {
+                        crate::config::SetupMode::RootOnly => println!("  Root mode: root_ssh_key"),
+                        crate::config::SetupMode::NewUser => println!("  User mode: root_ssh_key, sudo_username, sudo_password, user_ssh_key"),
+                        crate::config::SetupMode::Script => println!("  Script mode: root_ssh_key, script_path, script_args"),
+                    }
                 }
             }
             
@@ -384,17 +430,47 @@ async fn handle_command(config: &mut Config, input: &str) -> Result<()> {
             }
             
             let command = args.join(" ");
-            println!("Executing: {}", command);
-            
-            match ssh::execute_command(config, &command).await {
-                Ok(output) => {
-                    if !output.trim().is_empty() {
-                        println!("{}", output);
+            match crate::script::run_remote_command(config, &command).await {
+                Ok(()) => {},
+                Err(e) => {
+                    println!("Error executing command: {}", e);
+                }
+            }
+        }
+        "script" | "deploy" => {
+            match config.mode {
+                crate::config::SetupMode::Script => {
+                    if config.script_path.is_some() {
+                        println!("Running script deployment...");
+                        if let Err(e) = script::upload_and_run_script(config).await {
+                            println!("Script deployment failed: {}", e);
+                        }
+                    } else {
+                        println!("No script configured. Use 'set script_path <path>' to set a script for deployment.");
                     }
                 }
-                Err(e) => {
-                    println!("Command failed: {}", e);
+                _ => {
+                    println!("Not in script mode. Use 'set mode script' to enable script deployment mode.");
                 }
+            }
+        }
+        "upload_script" => {
+            if args.is_empty() {
+                println!("Usage: upload_script <script_path>");
+                return Ok(());
+            }
+            
+            let script_path = args.join(" ");
+            println!("Uploading script: {}", script_path);
+            
+            match script::upload_script_file(config, &script_path).await {
+                Ok(_) => println!("✓ Script uploaded successfully"),
+                Err(e) => println!("Script upload failed: {}", e),
+            }
+        }
+        "list_scripts" => {
+            if let Err(e) = script::list_remote_scripts(config).await {
+                println!("Failed to list scripts: {}", e);
             }
         }
         "clear" => {
@@ -425,6 +501,9 @@ Available Commands:
   copy_key, copykey      Copy SSH public key to root user (requires root password)
   setup                  🚀 Complete VPS setup (recommended - does everything needed)
   run, exec <command>    Execute command on remote server
+  script, deploy         🚀 Upload and run configured script (script mode)
+  upload_script <path>   Upload a script file to the server
+  list_scripts           List shell scripts in remote /tmp directory
   clear                  Clear the screen
   exit, quit             Exit the interactive shell
 
@@ -441,9 +520,10 @@ Available Commands:
     sudo_password        Password for NEW user (secure input - just type 'set sudo_password')
     new_user_ssh_key     SSH key for NEW user (optional, defaults to copying root's key)
 
-  🔧 SECURITY & CONNECTION SETTINGS:
-    use_root_ssh_key     Try SSH key first for root connection (true/false, default: true)
-    keep_root_password   Keep root password authentication (true/false, default: true)
+  🔧 SETTINGS:
+    skip_user_creation   Skip creating new user, configure root only (true/false, default: false)
+    script_path          Path to script file for deployment (~/ expansion supported)
+    script_args          Arguments to pass to the script when running
     info_file_path       Where to save setup info (~/ expansion supported)
 
 🔄 What 'setup' command does:
@@ -460,11 +540,16 @@ Available Commands:
   • use_root_ssh_key=false: Use password only for connection (for fresh VPS)
   • keep_root_password=true (DEFAULT): Root can use SSH key + password
   • keep_root_password=false: Root can only use SSH key (more secure)
+  • skip_user_creation=true: ROOT-ONLY mode - no new user, SSH key only
+  • skip_user_creation=false (DEFAULT): Create new user with sudo privileges
+  • script_mode=true: SCRIPT mode - upload and run scripts on server
+  • script_mode=false (DEFAULT): VPS setup mode
   • new_user_ssh_key: Set separate SSH key for new user, or defaults to copying root's
 
 🎯 RESULT: 
   • Root: SSH key + password OR SSH key only (based on keep_root_password setting)
   • NEW User: SSH key + password access + full sudo without prompts
+  • ROOT-ONLY mode: Only root user configured with SSH key authentication
   • Flexible, production-ready server setup
 
 📝 Example Setups:
@@ -489,6 +574,24 @@ Available Commands:
   set new_user_ssh_key ~/.ssh/deploy_key  # Different key for new user
   set keep_root_password false        # Disable root password (more secure)
   setup                               # Run complete setup
+
+🔸 Root-only mode (no new user, secure root only):
+  set username root                    # Connect as root
+  set password                        # Enter root password (for initial connection)
+  set use_root_ssh_key false          # Use password for initial connection
+  set ip 192.168.1.100                # Your VPS IP
+  set ssh_key ~/.ssh/id_rsa           # SSH key to configure for root
+  set skip_user_creation true         # Enable root-only mode
+  setup                               # Run complete setup
+
+🔸 Script deployment mode:
+  set username root                    # Connect as root  
+  set password                        # Enter root password (or use SSH key)
+  set ip 192.168.1.100                # Your VPS IP
+  set script_mode true                # Enable script deployment mode
+  set script_path ~/deploy.sh         # Path to your script
+  set script_args "arg1 arg2"         # Optional script arguments
+  script                              # Deploy and run the script
 
 💡 TIP: Use 'show' command to see your configuration before running 'setup'
 "#;

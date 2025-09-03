@@ -19,7 +19,7 @@ pub async fn test_connection(config: &Config) -> Result<()> {
 
     let username = username.clone();
     let ip = ip.clone();
-    let ssh_key_path = config.ssh_key_path.clone();
+    let ssh_key_path = config.root_ssh_key.clone();
     let password = config.password.clone();
 
     task::spawn_blocking(move || {
@@ -64,7 +64,7 @@ pub async fn copy_ssh_key(config: &Config) -> Result<()> {
     let username = config.username.as_ref().unwrap();
     let password = config.password.as_ref().unwrap();
     let ip = config.ip.as_ref().unwrap();
-    let ssh_key_path = config.ssh_key_path.as_ref().unwrap();
+    let ssh_key_path = config.root_ssh_key.as_ref().unwrap();
 
     if !Path::new(ssh_key_path).exists() {
         return Err(anyhow!("SSH key file not found: {}", ssh_key_path));
@@ -146,7 +146,7 @@ pub async fn execute_command(config: &Config, command: &str) -> Result<String> {
 
     let username = config.username.as_ref().unwrap();
     let ip = config.ip.as_ref().unwrap();
-    let ssh_key_path = config.ssh_key_path.clone();
+    let ssh_key_path = config.root_ssh_key.clone();
     let password = config.password.clone();
 
     let username = username.clone();
@@ -198,11 +198,11 @@ pub async fn execute_command(config: &Config, command: &str) -> Result<String> {
 pub async fn setup_vps(config: &Config) -> Result<()> {
     if !config.is_valid_for_connection() {
         return Err(anyhow!(
-            "Configuration incomplete. Need username, IP address, and SSH key path."
+            "Configuration incomplete. Need username and IP address."
         ));
     }
 
-    if config.sudo_username.is_none() || config.sudo_password.is_none() {
+    if matches!(config.mode, crate::config::SetupMode::NewUser) && (config.sudo_username.is_none() || config.sudo_password.is_none()) {
         return Err(anyhow!(
             "Configuration incomplete. Need sudo_username and sudo_password to create new user."
         ));
@@ -210,45 +210,82 @@ pub async fn setup_vps(config: &Config) -> Result<()> {
 
     let username = config.username.as_ref().unwrap();
     let ip = config.ip.as_ref().unwrap();
-    let sudo_username = config.sudo_username.as_ref().unwrap();
 
     println!("🚀 Starting VPS setup for {}@{}...", username, ip);
     println!("📋 Setup Plan:");
     println!("   • Connect using credentials for: {}@{}", username, ip);  
-    println!("   • Create NEW user: '{}'", sudo_username);
-    println!("   • Grant '{}' sudo privileges (no password required)", sudo_username);
-    if config.keep_root_password {
-        println!("   • Keep root password authentication enabled");
-    } else {
-        println!("   • Disable root password authentication (SSH key only)");
+    
+    match config.mode {
+        crate::config::SetupMode::RootOnly => {
+            println!("   • Configure root user with SSH key authentication only");
+            println!("   • Disable root password authentication (SSH key only)");
+        }
+        crate::config::SetupMode::NewUser => {
+            let sudo_username = config.sudo_username.as_ref().unwrap();
+            println!("   • Create NEW user: '{}'", sudo_username);
+            println!("   • Grant '{}' sudo privileges (no password required)", sudo_username);
+            println!("   • Keep root password authentication enabled");
+        }
+        crate::config::SetupMode::Script => {
+            println!("   • Upload and run script: {}", config.script_path.as_deref().unwrap_or("Not set"));
+        }
     }
     println!();
     
-    // Step 1: Test connection and optionally copy SSH key
-    println!("Step 1/4: Checking connection and SSH key setup...");
-    let _ssh_key_needed = check_and_setup_ssh_key(config).await?;
-    
-    // Step 2: Create new sudo user
-    println!("Step 2/4: Creating new sudo user '{}'...", sudo_username);
-    create_sudo_user(config).await?;
-    
-    // Step 3: Harden SSH config (disable root password login)
-    println!("Step 3/4: Hardening SSH configuration (disabling root password login)...");
-    harden_ssh_config(config).await?;
-    
-    // Step 4: Generate info file
-    println!("Step 4/4: Generating setup information file...");
-    generate_info_file(config).await?;
+    match config.mode {
+        crate::config::SetupMode::RootOnly => {
+            // Root-only mode - 3 steps
+            println!("Step 1/3: Checking connection and SSH key setup...");
+            let _ssh_key_needed = check_and_setup_ssh_key(config).await?;
+            
+            println!("Step 2/3: Hardening SSH configuration (disabling root password login)...");
+            harden_ssh_config(config).await?;
+            
+            println!("Step 3/3: Generating setup information file...");
+            generate_info_file(config).await?;
+        }
+        crate::config::SetupMode::NewUser => {
+            // New user mode - 4 steps
+            let sudo_username = config.sudo_username.as_ref().unwrap();
+            
+            println!("Step 1/4: Checking connection and SSH key setup...");
+            let _ssh_key_needed = check_and_setup_ssh_key(config).await?;
+            
+            println!("Step 2/4: Creating new sudo user '{}'...", sudo_username);
+            create_sudo_user(config).await?;
+            
+            println!("Step 3/4: Hardening SSH configuration...");
+            harden_ssh_config(config).await?;
+            
+            println!("Step 4/4: Generating setup information file...");
+            generate_info_file(config).await?;
+        }
+        crate::config::SetupMode::Script => {
+            // Script mode - just run the script
+            println!("Running script deployment...");
+            crate::script::upload_and_run_script(config).await?;
+            return Ok(()); // Don't do VPS setup for script mode
+        }
+    }
     
     println!("🎉 VPS setup completed successfully!");
     println!();
     println!("✅ SETUP SUMMARY:");
-    if config.keep_root_password {
-        println!("   • Root user: SSH key + password access (both enabled)");
-    } else {
-        println!("   • Root user: SSH key access only (password disabled)");
+    match config.mode {
+        crate::config::SetupMode::RootOnly => {
+            println!("   • Root user: SSH key access only (password disabled)");
+            println!("   • No new user created (root-only mode)");
+        }
+        crate::config::SetupMode::NewUser => {
+            let sudo_username = config.sudo_username.as_ref().unwrap();
+            println!("   • Root user: SSH key + password access (both enabled)");
+            println!("   • New user '{}': SSH key + password access + sudo privileges", sudo_username);
+        }
+        crate::config::SetupMode::Script => {
+            // This shouldn't be reached due to early return above
+            println!("   • Script executed");
+        }
     }
-    println!("   • New user '{}': SSH key + password access + sudo privileges", sudo_username);
     println!("   • Server is now configured and production-ready!");
     println!();
     println!("🔗 Next steps: Check the info file for connection details");
@@ -260,12 +297,12 @@ pub async fn check_and_setup_ssh_key(config: &Config) -> Result<bool> {
     let _username = config.username.as_ref().unwrap();
     let _ip = config.ip.as_ref().unwrap();
 
-    // If root SSH key usage is disabled, skip SSH key test and go straight to password
-    if !config.use_root_ssh_key {
-        println!("   ⚠️  Root SSH key authentication disabled, using password only");
+    // Check if we have an SSH key available, if not use password authentication
+    if config.root_ssh_key.is_none() {
+        println!("   ⚠️  No SSH key configured, using password authentication only");
         if config.password.is_none() {
             return Err(anyhow!(
-                "Root SSH key disabled but no password provided. Set password: set password <password>"
+                "No SSH key configured and no password provided. Set password: set password <password>"
             ));
         }
         println!("   📋 Copying SSH key using password authentication...");
@@ -303,12 +340,16 @@ pub async fn check_and_setup_ssh_key(config: &Config) -> Result<bool> {
 
 pub async fn test_ssh_key_auth(config: &Config) -> Result<()> {
     if !config.is_valid_for_connection() {
-        return Err(anyhow!("Configuration incomplete. Need at least username, IP, and SSH key path."));
+        return Err(anyhow!("Configuration incomplete. Need at least username and IP address."));
+    }
+    
+    if config.root_ssh_key.is_none() {
+        return Err(anyhow!("SSH key path is required for SSH key authentication test."));
     }
 
     let username = config.username.as_ref().unwrap();
     let ip = config.ip.as_ref().unwrap();
-    let ssh_key_path = config.ssh_key_path.as_ref().unwrap();
+    let ssh_key_path = config.root_ssh_key.as_ref().unwrap();
 
     let username = username.clone();
     let ip = ip.clone();
@@ -380,7 +421,7 @@ pub async fn setup_new_user_ssh_key(config: &Config, sudo_username: &str) -> Res
     }
 
     // Determine which SSH key to use for the new user
-    if let Some(new_user_key_path) = &config.new_user_ssh_key_path {
+    if let Some(new_user_key_path) = &config.user_ssh_key {
         // Use the specific SSH key for the new user
         println!("   📋 Copying new user's SSH key: {}", new_user_key_path);
         
@@ -446,7 +487,7 @@ pub async fn harden_ssh_config(config: &Config) -> Result<()> {
         "sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config".to_string(),
     ];
 
-    if config.keep_root_password {
+    if matches!(config.mode, crate::config::SetupMode::NewUser) {
         // Allow root password login but ensure SSH keys are also enabled
         commands.extend(vec![
             "sed -i 's/#PermitRootLogin yes/PermitRootLogin yes/' /etc/ssh/sshd_config".to_string(),
@@ -493,7 +534,7 @@ pub async fn generate_info_file(config: &Config) -> Result<()> {
 Setup Date: {}
 Server IP: {}
 Root Username: {}
-New User Created: {} (with sudo privileges)
+{}User Creation: {}
 
 SSH Configuration:
 - Root password login: {}
@@ -504,21 +545,11 @@ Connection Instructions:
 1. Connect as root:
    {}
 
-2. Connect as new user (key-based auth):
-   ssh -i {} {}@{}
-
-3. Run commands with sudo (no password required):
-   sudo <command>
-
-User Information:
-- New user '{}' was created with password authentication
-- New user has sudo privileges without password prompt
-- New user can also use SSH key authentication
-- Root authentication: {}
+{}
 
 Security Notes:
 - Public key authentication is enabled for root
-- New user can run sudo commands without entering password
+{}
 - SSH configuration backup saved at /etc/ssh/sshd_config.backup
 
 Generated by autovps
@@ -526,27 +557,49 @@ Generated by autovps
         now.format("%Y-%m-%d %H:%M:%S UTC"),
         config.ip.as_ref().unwrap(),
         config.username.as_ref().unwrap(),
-        config.sudo_username.as_ref().unwrap(),
-        if config.keep_root_password { "ENABLED" } else { "DISABLED" },
-        config.ssh_key_path.as_ref().unwrap(),
-        if config.keep_root_password { 
-            format!("SSH key: ssh -i {} {}@{}\n   Password: ssh {}@{}", 
-                config.ssh_key_path.as_ref().unwrap(),
-                config.username.as_ref().unwrap(),
-                config.ip.as_ref().unwrap(),
-                config.username.as_ref().unwrap(),
-                config.ip.as_ref().unwrap()) 
-        } else { 
-            format!("ssh -i {} {}@{} (SSH key only)", 
-                config.ssh_key_path.as_ref().unwrap(),
-                config.username.as_ref().unwrap(),
-                config.ip.as_ref().unwrap()) 
+        if matches!(config.mode, crate::config::SetupMode::RootOnly) { "New " } else { "" },
+        match config.mode {
+            crate::config::SetupMode::RootOnly => "SKIPPED (root-only mode)".to_string(),
+            _ => format!("{} (with sudo privileges)", config.sudo_username.as_ref().unwrap_or(&"N/A".to_string()))
         },
-        config.ssh_key_path.as_ref().unwrap(),
-        config.sudo_username.as_ref().unwrap(),
-        config.ip.as_ref().unwrap(),
-        config.sudo_username.as_ref().unwrap(),
-        if config.keep_root_password { "SSH key + password enabled" } else { "SSH key only (password disabled)" },
+        match config.mode {
+            crate::config::SetupMode::RootOnly => "DISABLED",
+            _ => "ENABLED"
+        },
+        config.root_ssh_key.as_ref().unwrap(),
+        match config.mode {
+            crate::config::SetupMode::NewUser => {
+                format!("SSH key: ssh -i {} {}@{}\n   Password: ssh {}@{}", 
+                    config.root_ssh_key.as_ref().unwrap(),
+                    config.username.as_ref().unwrap(),
+                    config.ip.as_ref().unwrap(),
+                    config.username.as_ref().unwrap(),
+                    config.ip.as_ref().unwrap())
+            },
+            _ => {
+                format!("ssh -i {} {}@{} (SSH key only)", 
+                    config.root_ssh_key.as_ref().unwrap(),
+                    config.username.as_ref().unwrap(),
+                    config.ip.as_ref().unwrap())
+            }
+        },
+        match config.mode {
+            crate::config::SetupMode::RootOnly => {
+                "Root-only mode - no additional user connection info".to_string()
+            },
+            crate::config::SetupMode::NewUser => {
+                format!("2. Connect as new user (key-based auth):\n   ssh -i {} {}@{}\n\n3. Run commands with sudo (no password required):\n   sudo <command>\n\nUser Information:\n- New user '{}' was created with password authentication\n- New user has sudo privileges without password prompt\n- New user can also use SSH key authentication\n- Root authentication: SSH key + password enabled",
+                    config.root_ssh_key.as_ref().unwrap(),
+                    config.sudo_username.as_ref().unwrap(),
+                    config.ip.as_ref().unwrap(),
+                    config.sudo_username.as_ref().unwrap())
+            },
+            _ => "Script mode - no user connection info".to_string()
+        },
+        match config.mode {
+            crate::config::SetupMode::RootOnly => "- Root password authentication disabled (SSH key only)",
+            _ => "- New user can run sudo commands without entering password"
+        },
     );
 
     fs::write(&info_path, info_content)

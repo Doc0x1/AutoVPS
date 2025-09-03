@@ -4,29 +4,35 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum SetupMode {
+    RootOnly,    // Configure root user only, disable password auth
+    NewUser,     // Create new user with sudo privileges 
+    Script,      // Deploy and run scripts
+}
+
+impl Default for SetupMode {
+    fn default() -> Self {
+        SetupMode::NewUser
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub mode: SetupMode,
     pub username: Option<String>,
     pub password: Option<String>,
     pub ip: Option<String>,
-    pub ssh_key_path: Option<String>,
+    pub root_ssh_key: Option<String>,
     pub sudo_username: Option<String>,
     pub sudo_password: Option<String>,
+    pub user_ssh_key: Option<String>,
+    pub script_path: Option<String>,
+    pub script_args: Option<String>,
     pub info_file_path: Option<String>,
-    #[serde(default = "default_keep_root_password")]
-    pub keep_root_password: bool,
-    #[serde(default = "default_use_root_ssh_key")]
-    pub use_root_ssh_key: bool,
-    pub new_user_ssh_key_path: Option<String>,
 }
 
-fn default_keep_root_password() -> bool {
-    true // Default to keeping root password authentication
-}
-
-fn default_use_root_ssh_key() -> bool {
-    true // Default to trying SSH key for root connection
-}
 
 impl Config {
     pub fn load() -> Result<Self> {
@@ -74,9 +80,25 @@ impl Config {
         self.ip = Some(ip);
     }
     
-    pub fn set_ssh_key_path(&mut self, path: String) -> Result<()> {
+    pub fn set_mode(&mut self, mode_str: &str) -> Result<()> {
+        self.mode = match mode_str.to_lowercase().as_str() {
+            "root" | "rootonly" | "root-only" => SetupMode::RootOnly,
+            "user" | "newuser" | "new-user" => SetupMode::NewUser,
+            "script" | "deploy" => SetupMode::Script,
+            _ => return Err(anyhow::anyhow!("Invalid mode. Available: root, user, script")),
+        };
+        Ok(())
+    }
+    
+    pub fn set_root_ssh_key(&mut self, path: String) -> Result<()> {
         let expanded_path = utils::validate_file_path(&path)?;
-        self.ssh_key_path = Some(expanded_path.to_string_lossy().to_string());
+        self.root_ssh_key = Some(expanded_path.to_string_lossy().to_string());
+        Ok(())
+    }
+    
+    pub fn set_user_ssh_key(&mut self, path: String) -> Result<()> {
+        let expanded_path = utils::validate_file_path(&path)?;
+        self.user_ssh_key = Some(expanded_path.to_string_lossy().to_string());
         Ok(())
     }
     
@@ -94,48 +116,60 @@ impl Config {
         Ok(())
     }
     
-    pub fn set_keep_root_password(&mut self, keep: bool) {
-        self.keep_root_password = keep;
-    }
     
-    pub fn set_use_root_ssh_key(&mut self, use_key: bool) {
-        self.use_root_ssh_key = use_key;
-    }
-    
-    pub fn set_new_user_ssh_key_path(&mut self, path: String) -> Result<()> {
+    pub fn set_script_path(&mut self, path: String) -> Result<()> {
         let expanded_path = utils::validate_file_path(&path)?;
-        self.new_user_ssh_key_path = Some(expanded_path.to_string_lossy().to_string());
+        self.script_path = Some(expanded_path.to_string_lossy().to_string());
         Ok(())
     }
     
+    pub fn set_script_args(&mut self, args: String) {
+        self.script_args = Some(args);
+    }
+    
+    pub fn get_mode(&self) -> String {
+        match self.mode {
+            SetupMode::RootOnly => "ROOT-ONLY",
+            SetupMode::NewUser => "NEW-USER",
+            SetupMode::Script => "SCRIPT",
+        }.to_string()
+    }
+    
     pub fn display(&self) {
-        println!("VPS Setup Configuration:");
+        println!("VPS Setup Configuration - Mode: {}", self.get_mode());
         println!();
-        println!("🔐 INITIAL CONNECTION:");
-        println!("  Root Username: {}", self.username.as_deref().unwrap_or("Not set"));
-        println!("  Root Password: {}", if self.password.is_some() { "***SET***" } else { "Not set" });
+        
+        println!("🔐 CONNECTION:");
+        println!("  Username: {}", self.username.as_deref().unwrap_or("Not set"));
+        println!("  Password: {}", if self.password.is_some() { "***SET***" } else { "Not set" });
         println!("  Server IP: {}", self.ip.as_deref().unwrap_or("Not set"));
-        println!("  Root SSH Key: {}", if self.ssh_key_path.is_some() { 
-            format!("{} ({})", 
-                self.ssh_key_path.as_deref().unwrap(),
-                if self.use_root_ssh_key { "enabled" } else { "disabled" }
-            )
-        } else { 
-            "Not set".to_string() 
-        });
         println!();
-        println!("👤 NEW USER TO CREATE:");
-        println!("  Username: {}", self.sudo_username.as_deref().unwrap_or("Not set"));
-        println!("  Password: {}", if self.sudo_password.is_some() { "***SET***" } else { "Not set" });
-        println!("  SSH Key: {}", self.new_user_ssh_key_path.as_deref().unwrap_or("Not set (will copy root SSH key)"));
-        println!("  (Will have sudo privileges without password prompts)");
-        println!();
-        println!("🔧 SECURITY SETTINGS:");
-        println!("  Use Root SSH Key: {} (try SSH key first for root connection)", 
-            if self.use_root_ssh_key { "YES" } else { "NO" });
-        println!("  Keep Root Password: {} (root can connect via {})", 
-            if self.keep_root_password { "YES" } else { "NO" },
-            if self.keep_root_password { "SSH key + password" } else { "SSH key only" });
+        
+        match self.mode {
+            SetupMode::RootOnly => {
+                println!("🔧 ROOT-ONLY MODE:");
+                println!("  Root SSH Key: {}", self.root_ssh_key.as_deref().unwrap_or("Not set"));
+                println!("  • Will disable root password authentication");
+                println!("  • Only SSH key access for root user");
+            }
+            SetupMode::NewUser => {
+                println!("👤 NEW USER MODE:");
+                println!("  Root SSH Key: {}", self.root_ssh_key.as_deref().unwrap_or("Not set"));
+                println!("  New Username: {}", self.sudo_username.as_deref().unwrap_or("Not set"));
+                println!("  New Password: {}", if self.sudo_password.is_some() { "***SET***" } else { "Not set" });
+                println!("  User SSH Key: {}", self.user_ssh_key.as_deref().unwrap_or("Will copy root key"));
+                println!("  • Will keep root password authentication enabled");
+                println!("  • New user gets sudo privileges without password");
+            }
+            SetupMode::Script => {
+                println!("🚀 SCRIPT MODE:");
+                println!("  SSH Key: {}", self.root_ssh_key.as_deref().unwrap_or("Not set"));
+                println!("  Script Path: {}", self.script_path.as_deref().unwrap_or("Not set"));
+                println!("  Script Args: {}", self.script_args.as_deref().unwrap_or("None"));
+                println!("  • Will upload and run the specified script");
+            }
+        }
+        
         println!();
         println!("📄 OUTPUT:");
         println!("  Info File: {}", self.info_file_path.as_deref().unwrap_or("./vps_setup_info.txt (default)"));
@@ -145,45 +179,52 @@ impl Config {
         println!("🚦 SETUP READINESS:");
         let missing_fields = self.get_missing_required_fields();
         if missing_fields.is_empty() {
-            println!("  ✅ Ready for setup! All required fields are configured.");
+            println!("  ✅ Ready! All required fields are configured.");
         } else {
-            println!("  ❌ Missing required fields: {}", missing_fields.join(", "));
-            println!("     Use 'set <field>' commands to configure missing fields.");
+            println!("  ❌ Missing: {}", missing_fields.join(", "));
         }
-        println!();
-        
-        println!("After setup completes:");
-        if self.keep_root_password {
-            println!("  • Root can connect via SSH key OR password");
-        } else {
-            println!("  • Root can only connect via SSH key (password disabled)");
-        }
-        println!("  • New user can connect via SSH key OR password");
-        println!("  • New user has full sudo access without password prompts");
     }
     
     fn get_missing_required_fields(&self) -> Vec<String> {
         let mut missing = Vec::new();
         
+        // Common requirements for all modes
         if self.username.is_none() {
             missing.push("username".to_string());
         }
         if self.ip.is_none() {
             missing.push("ip".to_string());
         }
-        if self.ssh_key_path.is_none() {
-            missing.push("ssh_key".to_string());
-        }
-        if self.sudo_username.is_none() {
-            missing.push("sudo_username".to_string());
-        }
-        if self.sudo_password.is_none() {
-            missing.push("sudo_password".to_string());
-        }
         
-        // If root SSH key is disabled, we need a password
-        if !self.use_root_ssh_key && self.password.is_none() {
-            missing.push("password (required when root SSH key is disabled)".to_string());
+        match self.mode {
+            SetupMode::RootOnly => {
+                // Root-only mode requires SSH key (will disable password auth)
+                if self.root_ssh_key.is_none() {
+                    missing.push("root_ssh_key".to_string());
+                }
+            }
+            SetupMode::NewUser => {
+                // New user mode needs either SSH key or password for initial connection
+                if self.root_ssh_key.is_none() && self.password.is_none() {
+                    missing.push("root_ssh_key or password".to_string());
+                }
+                // New user details
+                if self.sudo_username.is_none() {
+                    missing.push("sudo_username".to_string());
+                }
+                if self.sudo_password.is_none() {
+                    missing.push("sudo_password".to_string());
+                }
+            }
+            SetupMode::Script => {
+                // Script mode needs connection method and script
+                if self.root_ssh_key.is_none() && self.password.is_none() {
+                    missing.push("root_ssh_key or password".to_string());
+                }
+                if self.script_path.is_none() {
+                    missing.push("script_path".to_string());
+                }
+            }
         }
         
         missing
@@ -194,7 +235,7 @@ impl Config {
     }
     
     pub fn is_valid_for_key_copy(&self) -> bool {
-        self.username.is_some() && self.password.is_some() && self.ip.is_some() && self.ssh_key_path.is_some()
+        self.username.is_some() && self.password.is_some() && self.ip.is_some() && self.root_ssh_key.is_some()
     }
         
     fn config_file_path() -> Result<PathBuf> {

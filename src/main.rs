@@ -4,6 +4,7 @@ use anyhow::Result;
 mod config;
 mod ssh;
 mod shell;
+mod script;
 mod utils;
 
 #[derive(Parser)]
@@ -25,19 +26,21 @@ enum Commands {
         #[arg(short, long)]
         ip: Option<String>,
         #[arg(short, long)]
-        ssh_key: Option<String>,
+        mode: Option<String>,
+        #[arg(long)]
+        root_ssh_key: Option<String>,
+        #[arg(long)]
+        user_ssh_key: Option<String>,
         #[arg(long)]
         sudo_username: Option<String>,
         #[arg(long)]
         sudo_password: Option<String>,
         #[arg(long)]
+        script_path: Option<String>,
+        #[arg(long)]
+        script_args: Option<String>,
+        #[arg(long)]
         info_file_path: Option<String>,
-        #[arg(long)]
-        keep_root_password: Option<bool>,
-        #[arg(long)]
-        use_root_ssh_key: Option<bool>,
-        #[arg(long)]
-        new_user_ssh_key: Option<String>,
     },
     Show,
     Connect,
@@ -53,7 +56,7 @@ async fn main() -> Result<()> {
         Some(Commands::Interactive) | None => {
             shell::run_interactive_shell().await?;
         }
-        Some(Commands::Set { username, password, ip, ssh_key, sudo_username, sudo_password, info_file_path, keep_root_password, use_root_ssh_key, new_user_ssh_key }) => {
+        Some(Commands::Set { username, password, ip, mode, root_ssh_key, user_ssh_key, sudo_username, sudo_password, script_path, script_args, info_file_path }) => {
             let mut config = config::Config::load()?;
             
             if let Some(username) = username {
@@ -65,9 +68,21 @@ async fn main() -> Result<()> {
             if let Some(ip) = ip {
                 config.set_ip(ip);
             }
-            if let Some(ssh_key) = ssh_key {
-                if let Err(e) = config.set_ssh_key_path(ssh_key) {
-                    println!("Error setting SSH key path: {}", e);
+            if let Some(mode) = mode {
+                if let Err(e) = config.set_mode(&mode) {
+                    println!("Error setting mode: {}", e);
+                    return Ok(());
+                }
+            }
+            if let Some(root_ssh_key) = root_ssh_key {
+                if let Err(e) = config.set_root_ssh_key(root_ssh_key) {
+                    println!("Error setting root SSH key path: {}", e);
+                    return Ok(());
+                }
+            }
+            if let Some(user_ssh_key) = user_ssh_key {
+                if let Err(e) = config.set_user_ssh_key(user_ssh_key) {
+                    println!("Error setting user SSH key path: {}", e);
                     return Ok(());
                 }
             }
@@ -83,17 +98,14 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
-            if let Some(keep_root_password) = keep_root_password {
-                config.set_keep_root_password(keep_root_password);
-            }
-            if let Some(use_root_ssh_key) = use_root_ssh_key {
-                config.set_use_root_ssh_key(use_root_ssh_key);
-            }
-            if let Some(new_user_ssh_key) = new_user_ssh_key {
-                if let Err(e) = config.set_new_user_ssh_key_path(new_user_ssh_key) {
-                    println!("Error setting new user SSH key path: {}", e);
+            if let Some(script_path) = script_path {
+                if let Err(e) = config.set_script_path(script_path) {
+                    println!("Error setting script path: {}", e);
                     return Ok(());
                 }
+            }
+            if let Some(script_args) = script_args {
+                config.set_script_args(script_args);
             }
             
             config.save()?;
