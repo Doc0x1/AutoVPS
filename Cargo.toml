@@ -3,6 +3,10 @@ name = "autovps"
 version = "0.2.2"
 edition = "2024"
 
+[[bin]]
+name = "autovps"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
