@@ -14,5 +14,5 @@ tag-prefix = "v"
 pre-release-commit-message = "chore(release): {{version}}"
 
 # Don’t sign by default
-sign-commit = true
-sign-tag = true
+sign-commit = false
+sign-tag = false
