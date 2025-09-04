@@ -1,7 +1,7 @@
 # release.toml
 
 # Branch you cut releases from
-allow-branch = ["main"]
+allow-branch = ["master"]
 
 # Push commits and tags
 push = true
