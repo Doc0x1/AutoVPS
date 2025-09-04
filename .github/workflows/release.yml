@@ -1,97 +1,76 @@
-name: Build & Publish Release
+name: Release (Linux only)
 
 on:
   push:
     tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v1.2.3)"
-        required: false
+      - 'v*.*.*'   # v0.2.1, v1.0.0, etc.
 
 permissions:
-  contents: write
+  contents: write   # required to create releases & upload assets
 
 env:
   BIN_NAME: autovps
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            ext: ""
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            ext: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: ".exe"
-
+        target: [x86_64-unknown-linux-gnu]  # add aarch64-unknown-linux-gnu if you want it too
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: linux-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build (release)
+      - name: Build (${{ matrix.target }})
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary (auto-detect)
-        shell: bash
+      - name: Package artifact
         run: |
-          set -euo pipefail
-          OUTDIR="dist"
-          mkdir -p "$OUTDIR"
+          mkdir -p dist
+          TGT=${{ matrix.target }}
+          OUT=${BIN_NAME}-${TGT}
+          # copy binary
+          cp target/$TGT/release/${BIN_NAME} dist/$OUT
+          # make a tar.gz too (nice for curl installs)
+          tar -C dist -czf dist/${OUT}.tar.gz $OUT
+          # checksums
+          (cd dist && sha256sum $OUT > ${OUT}.sha256)
+          (cd dist && sha256sum ${OUT}.tar.gz > ${OUT}.tar.gz.sha256)
 
-          TAG="${{ github.ref_name || inputs.tag }}"
-          TARGET="${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.target }}
+          path: dist/*
 
-          # If you explicitly set env BIN_NAME, prefer it.
-          CANDIDATES=()
-          if [[ -n "${BIN_NAME:-}" ]]; then
-            CANDIDATES+=("target/$TARGET/release/${BIN_NAME}${{ matrix.ext }}")
-            # Try case variants too (helps if Cargo.toml uses caps)
-            CANDIDATES+=("target/$TARGET/release/${BIN_NAME^}${{ matrix.ext }}")
-            CANDIDATES+=("target/$TARGET/release/${BIN_NAME^^}${{ matrix.ext }}")
-          fi
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-linux]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
 
-          # Also discover any built binaries to fall back on
-          while IFS= read -r f; do CANDIDATES+=("$f"); done < <(find "target/$TARGET/release" -maxdepth 1 -type f -perm -u+x)
+      - name: Flatten artifacts
+        run: |
+          mkdir -p upload
+          find dist -type f -maxdepth 2 -exec mv {} upload/ \;
+          ls -lah upload
 
-          BIN=""
-          for f in "${CANDIDATES[@]}"; do
-            if [[ -f "$f" ]]; then BIN="$f"; break; fi
-          done
-          if [[ -z "$BIN" ]]; then
-            echo "No release binary found under target/$TARGET/release"; ls -la "target/$TARGET/release" || true
-            exit 1
-          fi
-
-          BASENAME=$(basename "$BIN")
-          # Archive name: <binary>-<tag>-<target>.<ext>
-          NAME="${BASENAME%${{ matrix.ext }}}"
-          ARCHIVE="${NAME}-${TAG}-${TARGET}"
-
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            7z a "${OUTDIR}/${ARCHIVE}.zip" "$BIN" >/dev/null
-          else
-            tar -C "$(dirname "$BIN")" -czf "${OUTDIR}/${ARCHIVE}.tar.gz" "$BASENAME"
-          fi
+      - name: Create/Update GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: upload/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

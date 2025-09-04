@@ -1,18 +1,11 @@
 # release.toml
-
-# Branch you cut releases from
 allow-branch = ["master"]
-
-# Push commits and tags
-push = true
-
-# Tag format
-tag-name = "v{{version}}"
-tag-prefix = "v"
-
-# Commit messages
-pre-release-commit-message = "chore(release): {{version}}"
-
-# Don’t sign by default
+tag-prefix = "v"                # tags like v0.2.1
+tag-name = "{{prefix}}{{version}}"
 sign-commit = false
 sign-tag = false
+push = true                     # push commits & tag
+publish = false                 # don't publish to crates.io
+
+# Optional: control the commit message for the version bump commit
+pre-release-commit-message = "chore(release): {{version}}"

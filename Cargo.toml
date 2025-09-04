@@ -1,7 +1,7 @@
 [package]
 name = "autovps"
-version = "0.2.0"
-edition = "2024"
+version = "0.2.1"
+edition = "2025"
 
 [[bin]]
 name = "autovps"
