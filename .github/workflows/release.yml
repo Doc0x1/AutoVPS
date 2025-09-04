@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 env:
-  BIN_NAME: autovps  # your binary name
+  BIN_NAME: autovps
 
 jobs:
   build:
@@ -54,7 +54,7 @@ jobs:
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binary (auto-detect)
         shell: bash
         run: |
           set -euo pipefail
@@ -62,14 +62,36 @@ jobs:
           mkdir -p "$OUTDIR"
 
           TAG="${{ github.ref_name || inputs.tag }}"
-          ARCHIVE="${BIN_NAME}-${TAG}-${{ matrix.target }}"
-          BIN="target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.ext }}"
+          TARGET="${{ matrix.target }}"
 
-          if [[ ! -f "$BIN" ]]; then
-            echo "Expected binary not found: $BIN"
+          # If you explicitly set env BIN_NAME, prefer it.
+          CANDIDATES=()
+          if [[ -n "${BIN_NAME:-}" ]]; then
+            CANDIDATES+=("target/$TARGET/release/${BIN_NAME}${{ matrix.ext }}")
+            # Try case variants too (helps if Cargo.toml uses caps)
+            CANDIDATES+=("target/$TARGET/release/${BIN_NAME^}${{ matrix.ext }}")
+            CANDIDATES+=("target/$TARGET/release/${BIN_NAME^^}${{ matrix.ext }}")
+          fi
+
+          # Also discover any built binaries to fall back on
+          while IFS= read -r f; do CANDIDATES+=("$f"); done < <(find "target/$TARGET/release" -maxdepth 1 -type f -perm -u+x)
+
+          BIN=""
+          for f in "${CANDIDATES[@]}"; do
+            if [[ -f "$f" ]]; then BIN="$f"; break; fi
+          done
+          if [[ -z "$BIN" ]]; then
+            echo "No release binary found under target/$TARGET/release"; ls -la "target/$TARGET/release" || true
             exit 1
           fi
+
+          BASENAME=$(basename "$BIN")
+          # Archive name: <binary>-<tag>-<target>.<ext>
+          NAME="${BASENAME%${{ matrix.ext }}}"
+          ARCHIVE="${NAME}-${TAG}-${TARGET}"
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a "${OUTDIR}/${ARCHIVE}.zip" "$BIN" >/dev/null
           else
+            tar -C "$(dirname "$BIN")" -czf "${OUTDIR}/${ARCHIVE}.tar.gz" "$BASENAME"
+          fi
