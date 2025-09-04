@@ -1,0 +1,60 @@
+name: Cut Release (from Cargo.toml)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag-if-needed:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      did_tag: ${{ steps.tag.outputs.did_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history & tags
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - id: ver
+        name: Read version from Cargo.toml
+        shell: bash
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - id: tag
+        name: Create tag if missing
+        shell: bash
+        run: |
+          git fetch --tags
+          TAG="v${{ steps.ver.outputs.version }}"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "did_tag=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists; skipping."
+          else
+            # Use your identity
+            git config user.name  "Doc0x1"
+            git config user.email "19937034+Doc0x1@users.noreply.github.com"
+
+            # Ensure the remote is correct (should already be origin from checkout)
+            git remote set-url origin "https://github.com/Doc0x1/AutoVPS.git"
+
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+            echo "did_tag=true" >> "$GITHUB_OUTPUT"
+            echo "Tagged $TAG"
+          fi

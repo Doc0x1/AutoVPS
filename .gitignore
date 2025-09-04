@@ -12,6 +12,8 @@ Cargo.lock
 *.swo
 *~
 
+CLAUDE.md
+
 # OS generated files
 .DS_Store
 .DS_Store?

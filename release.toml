@@ -1,0 +1,18 @@
+# release.toml
+
+# Branch you cut releases from
+allow-branch = ["main"]
+
+# Push commits and tags
+push = true
+
+# Tag format
+tag-name = "v{{version}}"
+tag-prefix = "v"
+
+# Commit messages
+pre-release-commit-message = "chore(release): {{version}}"
+
+# Don’t sign by default
+sign-commit = true
+sign-tag = true
