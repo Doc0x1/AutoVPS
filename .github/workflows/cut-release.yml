@@ -2,7 +2,7 @@ name: Cut Release (from Cargo.toml)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
@@ -46,11 +46,9 @@ jobs:
             echo "did_tag=false" >> "$GITHUB_OUTPUT"
             echo "Tag $TAG already exists; skipping."
           else
-            # Use your identity
             git config user.name  "Doc0x1"
             git config user.email "19937034+Doc0x1@users.noreply.github.com"
 
-            # Ensure the remote is correct (should already be origin from checkout)
             git remote set-url origin "https://github.com/Doc0x1/AutoVPS.git"
 
             git tag -a "$TAG" -m "Release $TAG"
